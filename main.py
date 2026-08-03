@@ -3,6 +3,7 @@ import json
 import yaml
 import requests
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from time import mktime
 
@@ -37,29 +38,38 @@ def get_published_datetime(entry):
     return None
 
 
-def summarize(title, content):
-    """Gemini APIで3行要約を生成する。"""
+def summarize(title, content, max_retries=5):
+    """Gemini APIで3行要約を生成する。429(レート制限)の場合は待って再試行する。"""
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
         f"{GEMINI_MODEL}:generateContent?key={LLM_API_KEY}"
     )
-    response = requests.post(
-        url,
-        headers={"content-type": "application/json"},
-        json={
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "text": f"以下の記事を3行で要約してください。\nタイトル: {title}\n本文: {content[:2000]}"
-                        }
-                    ]
-                }
-            ]
-        },
-    )
-    response.raise_for_status()
-    return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": f"以下の記事を3行で要約してください。\nタイトル: {title}\n本文: {content[:2000]}"
+                    }
+                ]
+            }
+        ]
+    }
+
+    for attempt in range(max_retries):
+        response = requests.post(url, headers={"content-type": "application/json"}, json=payload)
+
+        if response.status_code == 429:
+            # レート制限にかかった場合、待って再試行する(徐々に待ち時間を延ばす)
+            wait_seconds = 15 * (attempt + 1)
+            print(f"Rate limited. Waiting {wait_seconds}s before retry ({attempt + 1}/{max_retries})...")
+            time.sleep(wait_seconds)
+            continue
+
+        response.raise_for_status()
+        return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+    raise RuntimeError("Gemini API rate limit: max retries exceeded")
 
 
 def notify_slack(site_name, title, link, summary):
@@ -94,6 +104,9 @@ def main():
             summary = summarize(entry.title, summary_source)
             notify_slack(site["name"], entry.title, entry.link, summary)
             new_seen.add(entry.link)
+
+            # Gemini APIのレート制限対策として、記事ごとに少し間隔を空ける
+            time.sleep(4)
 
     save_seen(new_seen)
 
