@@ -15,7 +15,13 @@ LLM_API_KEY = os.environ["LLM_API_KEY"]
 GEMINI_MODEL = "gemini-3.5-flash"
 
 # 初回実行時にさかのぼる日数
-FIRST_RUN_DAYS = 30
+FIRST_RUN_DAYS = 7
+
+# 無料枠のRPD(1日の上限)対策: 1回の実行で処理する記事数の上限
+MAX_REQUESTS_PER_RUN = 15
+
+# 無料枠のRPM(1分あたりの上限=5)対策: リクエスト間の待機秒数
+REQUEST_INTERVAL_SECONDS = 13
 
 
 def load_seen():
@@ -63,8 +69,13 @@ def summarize(title, content, max_retries=5):
             # レート制限にかかった場合、待って再試行する(徐々に待ち時間を延ばす)
             wait_seconds = 15 * (attempt + 1)
             print(f"Rate limited. Waiting {wait_seconds}s before retry ({attempt + 1}/{max_retries})...")
+            print(f"Response body: {response.text}")
             time.sleep(wait_seconds)
             continue
+
+        if response.status_code >= 400:
+            # 429以外のエラーも中身を確認できるようにログ出力してから例外を投げる
+            print(f"Gemini API error {response.status_code}: {response.text}")
 
         response.raise_for_status()
         return response.json()["candidates"][0]["content"]["parts"][0]["text"]
@@ -87,16 +98,25 @@ def main():
     # 初回実行時の基準日(この日より古い記事は通知しない)
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=FIRST_RUN_DAYS)
 
+    request_count = 0
+
     for site in sites:
+        if request_count >= MAX_REQUESTS_PER_RUN:
+            break
+
         feed = feedparser.parse(site["rss"])
         for entry in feed.entries:
+            if request_count >= MAX_REQUESTS_PER_RUN:
+                print(f"Reached MAX_REQUESTS_PER_RUN={MAX_REQUESTS_PER_RUN}. Remaining articles will be processed next run.")
+                break
+
             if entry.link in seen:
                 continue
 
             if is_first_run:
                 published = get_published_datetime(entry)
                 if published is not None and published < cutoff_date:
-                    # 30日より古い記事は「既読扱い」にするだけで通知はしない
+                    # 指定日数より古い記事は「既読扱い」にするだけで通知はしない
                     new_seen.add(entry.link)
                     continue
 
@@ -104,9 +124,10 @@ def main():
             summary = summarize(entry.title, summary_source)
             notify_slack(site["name"], entry.title, entry.link, summary)
             new_seen.add(entry.link)
+            request_count += 1
 
-            # Gemini APIのレート制限対策として、記事ごとに少し間隔を空ける
-            time.sleep(4)
+            # 無料枠のRPM対策として、記事ごとに間隔を空ける
+            time.sleep(REQUEST_INTERVAL_SECONDS)
 
     save_seen(new_seen)
 
