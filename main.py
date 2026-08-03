@@ -10,6 +10,9 @@ SEEN_FILE = "seen.json"
 SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL"]
 LLM_API_KEY = os.environ["LLM_API_KEY"]
 
+# 使用するGeminiモデル(必要に応じて変更可能)
+GEMINI_MODEL = "gemini-3.5-flash"
+
 # 初回実行時にさかのぼる日数
 FIRST_RUN_DAYS = 30
 
@@ -35,27 +38,28 @@ def get_published_datetime(entry):
 
 
 def summarize(title, content):
-    """Claude APIで3行要約を生成する。"""
+    """Gemini APIで3行要約を生成する。"""
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={LLM_API_KEY}"
+    )
     response = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": LLM_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
+        url,
+        headers={"content-type": "application/json"},
         json={
-            "model": "claude-sonnet-4-6",
-            "max_tokens": 300,
-            "messages": [
+            "contents": [
                 {
-                    "role": "user",
-                    "content": f"以下の記事を3行で要約してください。\nタイトル: {title}\n本文: {content[:2000]}",
+                    "parts": [
+                        {
+                            "text": f"以下の記事を3行で要約してください。\nタイトル: {title}\n本文: {content[:2000]}"
+                        }
+                    ]
                 }
-            ],
+            ]
         },
     )
     response.raise_for_status()
-    return response.json()["content"][0]["text"]
+    return response.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 
 def notify_slack(site_name, title, link, summary):
