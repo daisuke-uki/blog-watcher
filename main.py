@@ -99,37 +99,50 @@ def main():
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=FIRST_RUN_DAYS)
 
     request_count = 0
+    stopped_early = False
 
-    for site in sites:
-        if request_count >= MAX_REQUESTS_PER_RUN:
-            break
-
-        feed = feedparser.parse(site["rss"])
-        for entry in feed.entries:
-            if request_count >= MAX_REQUESTS_PER_RUN:
-                print(f"Reached MAX_REQUESTS_PER_RUN={MAX_REQUESTS_PER_RUN}. Remaining articles will be processed next run.")
+    try:
+        for site in sites:
+            if request_count >= MAX_REQUESTS_PER_RUN or stopped_early:
                 break
 
-            if entry.link in seen:
-                continue
+            feed = feedparser.parse(site["rss"])
+            for entry in feed.entries:
+                if request_count >= MAX_REQUESTS_PER_RUN:
+                    print(f"Reached MAX_REQUESTS_PER_RUN={MAX_REQUESTS_PER_RUN}. Remaining articles will be processed next run.")
+                    stopped_early = True
+                    break
 
-            if is_first_run:
-                published = get_published_datetime(entry)
-                if published is not None and published < cutoff_date:
-                    # 指定日数より古い記事は「既読扱い」にするだけで通知はしない
-                    new_seen.add(entry.link)
+                if entry.link in seen:
                     continue
 
-            summary_source = getattr(entry, "summary", "")
-            summary = summarize(entry.title, summary_source)
-            notify_slack(site["name"], entry.title, entry.link, summary)
-            new_seen.add(entry.link)
-            request_count += 1
+                if is_first_run:
+                    published = get_published_datetime(entry)
+                    if published is not None and published < cutoff_date:
+                        # 指定日数より古い記事は「既読扱い」にするだけで通知はしない
+                        new_seen.add(entry.link)
+                        continue
 
-            # 無料枠のRPM対策として、記事ごとに間隔を空ける
-            time.sleep(REQUEST_INTERVAL_SECONDS)
+                summary_source = getattr(entry, "summary", "")
 
-    save_seen(new_seen)
+                try:
+                    summary = summarize(entry.title, summary_source)
+                except RuntimeError as e:
+                    # レート制限などで要約が作れない場合、異常終了はさせず、
+                    # この記事は未処理のまま次回実行に持ち越して今回はここで打ち切る
+                    print(f"Stopping this run early due to: {e}")
+                    stopped_early = True
+                    break
+
+                notify_slack(site["name"], entry.title, entry.link, summary)
+                new_seen.add(entry.link)
+                request_count += 1
+
+                # 無料枠のRPM対策として、記事ごとに間隔を空ける
+                time.sleep(REQUEST_INTERVAL_SECONDS)
+    finally:
+        # 途中で打ち切られた場合でも、ここまで通知済みの記事は必ず保存する
+        save_seen(new_seen)
 
 
 if __name__ == "__main__":
