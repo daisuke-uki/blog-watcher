@@ -62,25 +62,30 @@ def summarize(title, content, max_retries=5):
         ]
     }
 
+    # 429(レート制限)に加えて、500/502/503/504のような一時的なサーバーエラーもリトライ対象にする
+    retryable_status_codes = {429, 500, 502, 503, 504}
+
     for attempt in range(max_retries):
         response = requests.post(url, headers={"content-type": "application/json"}, json=payload)
 
-        if response.status_code == 429:
-            # レート制限にかかった場合、待って再試行する(徐々に待ち時間を延ばす)
+        if response.status_code in retryable_status_codes:
             wait_seconds = 15 * (attempt + 1)
-            print(f"Rate limited. Waiting {wait_seconds}s before retry ({attempt + 1}/{max_retries})...")
+            print(
+                f"Gemini API returned {response.status_code}. "
+                f"Waiting {wait_seconds}s before retry ({attempt + 1}/{max_retries})..."
+            )
             print(f"Response body: {response.text}")
             time.sleep(wait_seconds)
             continue
 
         if response.status_code >= 400:
-            # 429以外のエラーも中身を確認できるようにログ出力してから例外を投げる
+            # リトライ対象外のエラー(APIキー不正など)は中身を確認できるようログ出力してから例外を投げる
             print(f"Gemini API error {response.status_code}: {response.text}")
 
         response.raise_for_status()
         return response.json()["candidates"][0]["content"]["parts"][0]["text"]
 
-    raise RuntimeError("Gemini API rate limit: max retries exceeded")
+    raise RuntimeError("Gemini API: max retries exceeded (rate limit or server error)")
 
 
 def notify_slack(site_name, title, link, summary):
